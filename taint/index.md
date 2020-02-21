@@ -2,21 +2,27 @@
 
 ## Introduction
 
-Continuing the exploration of state provider models described [earlier][sps], we have roughly prototyped a modification to the solidity compiler that can detect instances of dynamic state access (DSA) in smart contracts using taint analysis.
+Deciding to support only static state access (SSA) or to support full dynamic state access (DSA) is one of the remaining open questions on the Eth2 roadmap. If a purely SSA system proves feasible, there are a number of benefits that simplify:
+  - State providers;
+  - Synchronous communication between execution environments;
+  - Account abstraction; and
+  - Transaction pools, witness aggregation and refreshes.
 
-One of the criteria for choosing between the direct push and other state provider models is whether writing smart contracts without DSA is possible. This prototype explores that criterion.
+Continuing the exploration of state provider models described [earlier][sps], we have roughly prototyped a modification to the solidity compiler that can detect instances of DSA in smart contracts using taint analysis.
+
+This proof of concept shows that it is possible to build tooling to support a purely SSA Ethereum.
 
 [sps]: https://ethresear.ch/t/state-provider-models-in-ethereum-2-0/6750
 
 ## Background
 
-### State Access
+### State Access & Witnesses
 
-DSA is a problem in a stateless Ethereum because it prevents the generation of a guaranteed-complete witness when a transaction is created.
+For the direct push state provider model to work, the actor creating the transaction should be able to build a witness (such as a Merkle proof) to every storage location the transaction will read or write. If the transaction *does* read from or write to a location not included in the witness, the transaction is reverted, and its fees are forfeit.
 
-In concrete terms, DSA occurs when the `offset` argument to `sload` or `sstore` is influenced by a previous `sload` result.
+DSA is a particularly problematic issue that can lead to an insufficient witness. In concrete terms, DSA occurs when the `offset` argument to `sload` or `sstore` is influenced by a previous `sload` result.
 
-A short classification of types of DSA, with solidity examples, can be found [here][dsa-gist].
+A short classification of some types of DSA, with solidity examples, can be found [here][dsa-gist].
 
 [dsa-gist]: https://gist.github.com/SamWilsn/369de587ac7373c8f77ed26079531671
 
@@ -386,9 +392,11 @@ The solidity compiler's Yul implementation doesn't yet support libraries. This m
 
 ## Conclusions
 
-Although the limitations mentioned above made analyzing existing contracts for DSA difficult, we believe that a fully featured and complete compiler **can** be built, with reasonable effort, to detect and prevent DSA. Furthermore, given the ease of inadvertently introducing DSA, we believe that such a compiler is **necessary** to write secure smart contracts.
+Although the limitations mentioned above present challenges for analyzing existing contracts for DSA, we believe that existing compilers **can** be extended, with reasonable effort, to detect and prevent DSA while maintaining features. Furthermore, given the ease of inadvertently introducing DSA, we believe that adding this feature to smart contract compilers is **necessary** to write secure code.
 
 [One contract][ERC20], part of [@PhABC][PhABC]'s uniswap-solidity, did successfully compile with minimal modification.
+
+A big thanks to Quilt for supporting this research and providing invaluable review and feedback.
 
 [PhABC]: https://ethresear.ch/u/phabc/summary
 [ERC20]: https://github.com/PhABC/uniswap-solidity/blob/2434367a66b6091db7b808ed91e7ade61fad6f7d/contracts/tokens/ERC20.sol
