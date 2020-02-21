@@ -4,14 +4,21 @@
 
 Continuing the exploration of state provider models described [earlier][sps], we have roughly prototyped a modification to the solidity compiler that can detect instances of dynamic state access (DSA) in smart contracts using taint analysis.
 
+One of the criteria for choosing between the direct push and other state provider models is whether writing smart contracts without DSA is possible. This prototype explores that criterion.
+
 [sps]: https://ethresear.ch/t/state-provider-models-in-ethereum-2-0/6750
 
 ## Background
 
 ### State Access
 
- - Why is DSA a problem?
- - Examples of DSA
+DSA is a problem in a stateless Ethereum because it prevents the generation of a guaranteed-complete witness when a transaction is created.
+
+In concrete terms, DSA occurs when the `offset` argument to `sload` or `sstore` is influenced by a previous `sload` result.
+
+A short classification of types of DSA, with solidity examples, can be found [here][dsa-gist].
+
+[dsa-gist]: https://gist.github.com/SamWilsn/369de587ac7373c8f77ed26079531671
 
 ### Yul Language
 
@@ -25,11 +32,13 @@ Taint analysis (or [taint checking][taint]) is a type of data flow analysis wher
 
 In a compiled language, it is conceptually similar to symbolic execution, though much less complex.
 
-Consider the following example, where the parameter `value` is tainted:
+Consider the following example, where `value` is tainted by an `sload`:
 
 ```yul
-function tweedle(value) -> twixt
+function tweedle() -> twixt
 {
+    let zero := 0
+    let value := sload(zero)
     let dee := 45
     let dum := add(dee, value)
     let rattle := 88
@@ -55,6 +64,7 @@ digraph tweedle {
     selector            [fontcolor=red, color=red];
     twixt               [fontcolor=red, color=red]
     
+    zero -> value
     value -> dum        [color=red]
     dee -> dum
     dum -> selector     [color=red]
@@ -71,7 +81,7 @@ digraph tweedle {
 
 ### Implementation
 
-Implementation source code is available for [solidity 0.5][solc-5] and for [solidity 0.6][solc-6], though not all features are implemented on both branches. This prototype is built as a Yul optimization pass, and so requires `--optimize-yul --ir` as additional compiler flags.
+Implementation source code is available for [solidity 0.5][solc-5] and for [solidity 0.6][solc-6], though not all features are implemented on both branches. Test cases can be found [here][tests], though not all successfully pass. This prototype is built as a Yul optimization pass, and so requires `--optimize-yul --ir` as additional compiler flags.
 
 Since this is a proof of concept, the output is messy and barely readable, the implementation is inefficient, and is 100% capable of summoning [nasal demons][undefined]. Obviously, don't use this software in any kind of production environment.
 
@@ -80,6 +90,7 @@ The analysis can be split into three conceptual phases: data gathering, function
 [solc-5]: https://github.com/SamWilsn/solidity/blob/state-taint-0.5.16/libyul/optimiser/OrderDependentStateDestroyer.cpp
 [solc-6]: https://github.com/SamWilsn/solidity/blob/state-taint/libyul/optimiser/OrderDependentStateDestroyer.cpp
 [undefined]: https://en.wikipedia.org/wiki/Undefined_behavior
+[tests]: https://github.com/SamWilsn/taint-tests
 
 #### Data Gathering
 
@@ -167,11 +178,17 @@ digraph {
 }
 ```
 
-The variable `!!block_0` is synthesized to represent indirect influence, though there is none in this example. The `!!main` function represents the statements not contained in any other function.
+The variable `!!block_0` is synthesized to represent indirect influence, such as `if` statements and loops. This example does not contain any indirect influence, though the block variables are still created. The `!!main` function represents statements not contained in any other function, like the `sstore` in the example code.
 
-Data flow, in the example output, shows how taint would flow from upstream variables (to the left of `->`) to downstream variables (on the right.)
+Data flow, in the example output, shows how data flows from upstream variables (to the left of `->`) to downstream variables (on the right.)
 
 Note that `fun_narf_19` is listed as an unresolved function call.
+
+##### A Note on Memory
+
+Memory accesses are tracked by synthesizing variables (ex. `!!m0`) for every `mstore`, similar to how compilers convert to [single static assignment][ssa] form. This process relies on very basic [constant folding][const]. Should an `mstore` or an `mload` access an offset which is not computable at compile time or has not been written to yet, a catch-all variable `!!memory` is used instead.
+
+[ssa]: https://en.wikipedia.org/wiki/Static_single_assignment_form
 
 #### Function Resolution
 
@@ -216,7 +233,7 @@ digraph {
 
 Last, and probably simplest, is taint checking. This phase walks through the data flow graph, tainting every variable that is reachable from an initially tainted variable.
 
-Once the taint is propagated, the "protected" variables (variables used as the location argument to an `sload` or `sstore`) are checked for taint. If tainted protected variables are found, a taint violation exception is thrown.
+Once the taint is propagated, the "protected" variables (variables used as the key argument to an `sload` or `sstore`) are checked for taint. If tainted protected variables are found, a taint violation exception is thrown.
 
 In this example, `ret_0` is both protected and tainted.
 
@@ -245,13 +262,83 @@ digraph {
 
 ### Limitations & Future Work
 
+<details>
+<summary>Click to expand...</summary>
+
 #### Call Graph Cycles
+
+A call graph cycle happens when a function `foo` calls a function `bar` and `bar` also calls `foo`. For example:
+
+```yul
+function foo(arg0) -> ret0 {
+    switch arg0
+    case 0 {
+        ret0 := bar()
+    }
+    default {
+        ret0 := 1
+    }
+}
+
+function bar() -> ret1 {
+    ret1 := foo(1)
+}
+```
+
+Cycles in the call graph currently cause the prototype to loop infinitely. It should be possible to break these cycles by assuming all parameters of one function influence all of that function's return variables.
 
 #### Constant Propagation
 
+[Constant propagation][const] is the process of substituting the values of known constants in expressions at compile time.
+
+This prototype implements a very limited form of constant propagation to support the `mstore` and `mload` instructions. If the offset argument to `mstore` or `mload` can be computed at compile time, the taint analysis through memory is more accurate (fewer misleading taint violations.)
+
+[const]: https://en.wikipedia.org/wiki/Constant_folding#Constant_folding
+
 #### Calling Contracts
 
+The builtin functions to call other contracts are disabled in the prototype. Enabling them requires further thought on the ABI between contracts.
+
+Currently the prototype assumes that call data opcodes (`CALLDATALOAD`, `CALLDATASIZE`, `CALLDATACOPY`, etc) return untainted data. If a contract calls another contract, that assumption is invalidated.
+
 #### Control Flow
+
+The approach taken in this prototype to handle control flow and branching (synthesizing `!!block` variables) is insufficient to accurately trace taint through loops.
+
+Consider the following:
+
+```yul
+function fizzbuzz() {
+    for { } 1 { }
+    {
+        let zero := 0
+        let foo := sload(zero)
+        let cond := eq(foo, zero)
+        if cond {
+            break
+        }
+    }
+}
+```
+
+Which roughly translates to the following data flow graph:
+
+```graphviz
+digraph ControlFlow {
+    zero [color=purple, fontcolor=purple];
+    foo [color=red, fontcolor=red, style=bold];
+    cond [color=red, fontcolor=red];
+    "!!block_0" [color=red, fontcolor=red];
+    
+    zero -> cond;
+    foo -> cond [color=red];
+    cond -> "!!block_0" [color=red, style=dotted];
+    "!!block_0" -> zero [color=red];
+    "!!block_0" -> foo [color=red];
+}
+```
+
+`zero` is not influenced by `!!block_0` between where it is assigned and where it is used for `sload`. In other words, `zero` is not dependent on `storage[0]` at the time `sload` is called, even though the data flow graph thinks it is.
 
 #### Bit-Accurate Taint
 
@@ -267,7 +354,8 @@ function fizzbuzz(value)
     // Place a constant byte into memory.
     mstore(0, 0xAB)
     
-    // Read a value from storage, place it into memory.
+    // Read a value from storage, place it into memory. This
+    // taints memory offsets 1 through 32 inclusive. 
     let from_storage := sload(0)
     mstore(1, from_storage)
     
@@ -288,6 +376,19 @@ digraph structs {
 }
 ```
 
-Since `mem_tainted` reads the first 32 bytes of memory, it contains 31 tainted bytes. `mem_cleaned`, on the other hand, contains no tainted bytes, since only the first byte can influence its value.
+Since `mload(0)` populates `mem_tainted` with the first 32 bytes of memory, `mem_tainted` contains 31 tainted bytes (all bytes after `memory[0]`). `mem_cleaned`, on the other hand, contains no tainted bytes, since only the first byte can influence its value; the other bits are masked out by `and`.
+
+#### Unimplemented Features in Yul
+
+The solidity compiler's Yul implementation doesn't yet support libraries. This makes analyzing existing contracts tedious at best.
+
+</details>
 
 ## Conclusions
+
+Although the limitations mentioned above made analyzing existing contracts for DSA difficult, we believe that a fully featured and complete compiler **can** be built, with reasonable effort, to detect and prevent DSA. Furthermore, given the ease of inadvertently introducing DSA, we believe that such a compiler is **necessary** to write secure smart contracts.
+
+[One contract][ERC20], part of [@PhABC][PhABC]'s uniswap-solidity, did successfully compile with minimal modification.
+
+[PhABC]: https://ethresear.ch/u/phabc/summary
+[ERC20]: https://github.com/PhABC/uniswap-solidity/blob/2434367a66b6091db7b808ed91e7ade61fad6f7d/contracts/tokens/ERC20.sol
